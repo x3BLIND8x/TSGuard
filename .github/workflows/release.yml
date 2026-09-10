@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch TeamSpeak SDK
+        run: ./scripts/bootstrap-sdk.sh
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Upload Linux binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: build/out/tsguard.so
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch TeamSpeak SDK
+        shell: pwsh
+        run: ./scripts/bootstrap-sdk.ps1
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Upload Windows binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: build/out/tsguard_win64.dll
+
+  publish:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: linux
+          path: artifacts/linux
+
+      - name: Download Windows binary
+        uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: artifacts/windows
+
+      - name: Package release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 scripts/package_release.py \
+            --version "$VERSION" \
+            --linux artifacts/linux/tsguard.so \
+            --windows artifacts/windows/tsguard_win64.dll \
+            --out dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: TSGuard
+          generate_release_notes: true
+          files: |
+            dist/TSGuard.ts3_plugin
+            dist/TSGuard-windows-amd64.zip
+            dist/TSGuard-linux-amd64.tar.gz
+            dist/SHA256SUMS.txt
