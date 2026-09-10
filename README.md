@@ -2,7 +2,7 @@
 
 TSGuard is a native **TeamSpeak 3** client plugin for **Windows x64 and Linux x64**, targeting **Plugin API 26** (TeamSpeak 3.6.0+).
 
-## v1.0 features
+## Features
 
 - **AntiMove / AntiKick** — one combined switch. If another client/admin moves you or kicks you from a channel, TSGuard requests a move back to the previous channel.
 - **Anti Server Kick** — optional reconnect about 1 second after a server kick and requests the saved last channel again.
