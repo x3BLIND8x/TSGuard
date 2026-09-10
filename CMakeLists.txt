@@ -32,7 +32,7 @@ endforeach()
 
 if(WIN32)
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-        message(FATAL_ERROR "TSGuard v1.0 supports the 64-bit TeamSpeak 3 client only on Windows.")
+        message(FATAL_ERROR "TSGuard supports the 64-bit TeamSpeak 3 client only on Windows.")
     endif()
     set_target_properties(tsguard PROPERTIES OUTPUT_NAME "tsguard_win64")
     target_compile_definitions(tsguard PRIVATE _CRT_SECURE_NO_WARNINGS)

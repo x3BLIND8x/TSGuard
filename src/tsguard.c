@@ -944,7 +944,7 @@ TSG_EXPORT int ts3plugin_init(void)
         worker_started = 0;
         tsg_log(0, LogLevel_WARNING, "Worker thread failed to start; Auto Away and delayed reconnect will be unavailable.");
     }
-    tsg_log(0, LogLevel_INFO, "Loaded v%s (Plugin API %d)", TSG_VERSION, TSG_PLUGIN_API_VERSION);
+    tsg_log(0, LogLevel_INFO, "Loaded");
     return 0;
 }
 

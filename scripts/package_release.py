@@ -62,11 +62,11 @@ def main() -> None:
         write_text(universal / "package.ini", package_ini)
         shutil.copy2(args.linux, plugins / "tsguard.so")
         shutil.copy2(args.windows, plugins / "tsguard_win64.dll")
-        ts3_pkg = out / f"TSGuard-v{args.version}.ts3_plugin"
+        ts3_pkg = out / "TSGuard.ts3_plugin"
         zip_tree(universal, ts3_pkg)
 
         # Linux manual installer archive.
-        linux_dir = td / f"TSGuard-v{args.version}-linux-amd64"
+        linux_dir = td / "TSGuard-linux-amd64"
         linux_dir.mkdir()
         shutil.copy2(args.linux, linux_dir / "tsguard.so")
         install_sh = linux_dir / "install.sh"
@@ -81,12 +81,12 @@ echo "Restart TeamSpeak 3."
 """)
         install_sh.chmod(0o755)
         write_text(linux_dir / "README.txt", "Run ./install.sh, then restart TeamSpeak 3.\n")
-        linux_tar = out / f"TSGuard-v{args.version}-linux-amd64.tar.gz"
+        linux_tar = out / "TSGuard-linux-amd64.tar.gz"
         with tarfile.open(linux_tar, "w:gz") as tf:
             tf.add(linux_dir, arcname=linux_dir.name)
 
         # Windows manual installer archive.
-        win_dir = td / f"TSGuard-v{args.version}-windows-amd64"
+        win_dir = td / "TSGuard-windows-amd64"
         win_dir.mkdir()
         shutil.copy2(args.windows, win_dir / "tsguard_win64.dll")
         write_text(win_dir / "install.ps1", r'''$ErrorActionPreference = 'Stop'
@@ -101,7 +101,7 @@ Write-Host "Installed TSGuard to $dest\tsguard_win64.dll"
 Write-Host 'Restart TeamSpeak 3.'
 ''')
         write_text(win_dir / "README.txt", "Right-click install.ps1 -> Run with PowerShell, then restart TeamSpeak 3.\n")
-        win_zip = out / f"TSGuard-v{args.version}-windows-amd64.zip"
+        win_zip = out / "TSGuard-windows-amd64.zip"
         zip_tree(win_dir, win_zip)
 
     artifacts = sorted(p for p in out.iterdir() if p.is_file())
