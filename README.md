@@ -117,20 +117,3 @@ cmake -S . -B build -A x64
 cmake --build build --config Release --parallel
 ./scripts/install-windows.ps1 -PluginPath ./build/out/tsguard_win64.dll
 ```
-
-## Releases
-
-GitHub Actions builds both platforms on pushes and pull requests. Pushing a version tag such as `v1.0` creates a GitHub Release with:
-
-```text
-TSGuard.ts3_plugin
-TSGuard-windows-amd64.zip
-TSGuard-linux-amd64.tar.gz
-SHA256SUMS.txt
-```
-
-See [PUBLISHING.md](PUBLISHING.md) for the release workflow.
-
-## License
-
-See [LICENSE](LICENSE).
