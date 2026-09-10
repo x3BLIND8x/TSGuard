@@ -1,0 +1,6 @@
+Name = TSGuard
+Type = Plugin
+Author = Blond
+Version = 1.0
+Platforms = win64, linux_amd64
+Description = "TeamSpeak 3 QoL guard with AntiMove/AntiKick, reconnect helpers, Auto Away, echo-back, group restoration, AutoFollow and logging."
