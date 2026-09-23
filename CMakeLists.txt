@@ -48,5 +48,13 @@ else()
     set_target_properties(tsguard PROPERTIES OUTPUT_NAME "tsguard")
     find_package(Threads REQUIRED)
     target_link_libraries(tsguard PRIVATE Threads::Threads)
+
+    find_package(X11)
+    if(X11_FOUND)
+        target_compile_definitions(tsguard PRIVATE TSG_HAVE_X11=1)
+        target_include_directories(tsguard PRIVATE ${X11_INCLUDE_DIR})
+        target_link_libraries(tsguard PRIVATE ${X11_LIBRARIES})
+    endif()
+
     target_compile_options(tsguard PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
 endif()
