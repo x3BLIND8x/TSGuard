@@ -17,6 +17,11 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <strings.h>
+#include <unistd.h>
+#ifdef TSG_HAVE_X11
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#endif
 #endif
 
 #include "teamspeak/public_definitions.h"
@@ -45,6 +50,8 @@
 #define TSG_ECHO_LOOP_WINDOW_MS 5000ULL
 #define TSG_AUTO_AWAY_SECONDS 300ULL
 #define TSG_WORKER_SLEEP_MS 250ULL
+#define TSG_HOST_MESSAGE_CLOSE_DELAY_MS 700ULL
+#define TSG_CONFIG_NAME "tsguard.conf"
 
 #define TSG_ON  "[color=#00d26a][b]ON[/b][/color]"
 #define TSG_OFF "[color=#ff5c5c][b]OFF[/b][/color]"
@@ -59,6 +66,7 @@ enum {
     TSG_MENU_TOGGLE_AUTO_AWAY = 14,
     TSG_MENU_TOGGLE_GROUP_GUARD = 15,
     TSG_MENU_RETURN_LAST = 16,
+    TSG_MENU_TOGGLE_HOST_MESSAGE = 17,
 
     TSG_MENU_STATUS_HEADER = 100,
     TSG_MENU_STATUS_ANTIMOVE = 101,
@@ -67,6 +75,7 @@ enum {
     TSG_MENU_STATUS_ECHO = 104,
     TSG_MENU_STATUS_AUTO_AWAY = 105,
     TSG_MENU_STATUS_GROUP_GUARD = 106,
+    TSG_MENU_STATUS_HOST_MESSAGE = 107,
 };
 
 enum {
@@ -85,6 +94,7 @@ typedef struct {
     int echo_back;
     int auto_away;
     int anti_group_removal;
+    int auto_close_host_message;
     int logging;
 
     anyID follow_client;
@@ -112,6 +122,8 @@ typedef struct {
     uint64_t last_poke_echo_ms;
 
     int auto_away_owned;
+    int host_message_close_pending;
+    uint64_t host_message_close_at_ms;
 
     char host[TSG_CONNECT_MAX];
     unsigned short port;
@@ -137,7 +149,20 @@ typedef struct {
     char channel_password[TSG_CONNECT_MAX];
 } TSGReconnectTask;
 
+typedef struct {
+    int anti_move;
+    int anti_server_kick;
+    int anti_temp_ban;
+    int echo_back;
+    int auto_away;
+    int anti_group_removal;
+    int auto_close_host_message;
+    int logging;
+} TSGPreferences;
+
 static struct TS3Functions ts3Functions;
+static TSGPreferences preferences = {1, 0, 0, 0, 0, 0, 0, 1};
+static char preferences_path[TSG_CONNECT_MAX * 2];
 static TSGServerState states[TSG_MAX_SERVERS];
 static char* pluginID = NULL;
 #ifdef _WIN32
@@ -223,6 +248,112 @@ static uint64_t hash_text(const char* s)
     return h;
 }
 
+static void build_preferences_path(void)
+{
+    char config_dir[TSG_CONNECT_MAX * 2] = {0};
+    size_t len;
+
+    preferences_path[0] = '\0';
+    if (!ts3Functions.getConfigPath) {
+        return;
+    }
+
+    ts3Functions.getConfigPath(config_dir, sizeof(config_dir));
+    if (!config_dir[0]) {
+        return;
+    }
+
+    len = strlen(config_dir);
+    if (config_dir[len - 1] == '/' || config_dir[len - 1] == '\\') {
+        snprintf(preferences_path, sizeof(preferences_path), "%s%s", config_dir, TSG_CONFIG_NAME);
+    } else {
+#ifdef _WIN32
+        snprintf(preferences_path, sizeof(preferences_path), "%s\\%s", config_dir, TSG_CONFIG_NAME);
+#else
+        snprintf(preferences_path, sizeof(preferences_path), "%s/%s", config_dir, TSG_CONFIG_NAME);
+#endif
+    }
+}
+
+static void load_preferences(void)
+{
+    FILE* f;
+    char line[128];
+    char key[64];
+    int value;
+
+    preferences = (TSGPreferences){1, 0, 0, 0, 0, 0, 0, 1};
+    build_preferences_path();
+    if (!preferences_path[0]) {
+        return;
+    }
+
+    f = fopen(preferences_path, "r");
+    if (!f) {
+        return;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%63[^=]=%d", key, &value) != 2) {
+            continue;
+        }
+        value = value ? 1 : 0;
+        if (!strcmp(key, "anti_move")) preferences.anti_move = value;
+        else if (!strcmp(key, "anti_server_kick")) preferences.anti_server_kick = value;
+        else if (!strcmp(key, "anti_temp_ban")) preferences.anti_temp_ban = value;
+        else if (!strcmp(key, "echo_back")) preferences.echo_back = value;
+        else if (!strcmp(key, "auto_away")) preferences.auto_away = value;
+        else if (!strcmp(key, "anti_group_removal")) preferences.anti_group_removal = value;
+        else if (!strcmp(key, "auto_close_host_message")) preferences.auto_close_host_message = value;
+        else if (!strcmp(key, "logging")) preferences.logging = value;
+    }
+    fclose(f);
+}
+
+static void save_preferences(void)
+{
+    FILE* f;
+
+    if (!preferences_path[0]) {
+        build_preferences_path();
+    }
+    if (!preferences_path[0]) {
+        return;
+    }
+
+    f = fopen(preferences_path, "w");
+    if (!f) {
+        return;
+    }
+
+    fprintf(f, "anti_move=%d\n", preferences.anti_move);
+    fprintf(f, "anti_server_kick=%d\n", preferences.anti_server_kick);
+    fprintf(f, "anti_temp_ban=%d\n", preferences.anti_temp_ban);
+    fprintf(f, "echo_back=%d\n", preferences.echo_back);
+    fprintf(f, "auto_away=%d\n", preferences.auto_away);
+    fprintf(f, "anti_group_removal=%d\n", preferences.anti_group_removal);
+    fprintf(f, "auto_close_host_message=%d\n", preferences.auto_close_host_message);
+    fprintf(f, "logging=%d\n", preferences.logging);
+    fclose(f);
+}
+
+static void persist_state_options(const TSGServerState* st)
+{
+    if (!st) {
+        return;
+    }
+
+    preferences.anti_move = st->anti_move;
+    preferences.anti_server_kick = st->anti_server_kick;
+    preferences.anti_temp_ban = st->anti_temp_ban;
+    preferences.echo_back = st->echo_back;
+    preferences.auto_away = st->auto_away;
+    preferences.anti_group_removal = st->anti_group_removal;
+    preferences.auto_close_host_message = st->auto_close_host_message;
+    preferences.logging = st->logging;
+    save_preferences();
+}
+
 static TSGServerState* state_for(uint64 schid)
 {
     size_t i;
@@ -244,13 +375,14 @@ static TSGServerState* state_for(uint64 schid)
         memset(free_slot, 0, sizeof(*free_slot));
         free_slot->used = 1;
         free_slot->schid = schid;
-        free_slot->anti_move = 1;
-        free_slot->anti_server_kick = 0;
-        free_slot->anti_temp_ban = 0;
-        free_slot->echo_back = 0;
-        free_slot->auto_away = 0;
-        free_slot->anti_group_removal = 0;
-        free_slot->logging = 1;
+        free_slot->anti_move = preferences.anti_move;
+        free_slot->anti_server_kick = preferences.anti_server_kick;
+        free_slot->anti_temp_ban = preferences.anti_temp_ban;
+        free_slot->echo_back = preferences.echo_back;
+        free_slot->auto_away = preferences.auto_away;
+        free_slot->anti_group_removal = preferences.anti_group_removal;
+        free_slot->auto_close_host_message = preferences.auto_close_host_message;
+        free_slot->logging = preferences.logging;
         found = free_slot;
     }
     state_unlock();
@@ -468,18 +600,18 @@ static void print_status(uint64 schid)
     }
 
     tsg_print(schid,
-             "[color=#00d26a][b]STATUS[/b]  AntiMove/AntiKick=%s | ServerKick=%s | TempBan=%s | EchoBack=%s | AutoAway=%s | GroupGuard=%s | Follow=%u[/color]",
+             "[color=#00d26a][b]STATUS[/b]  AntiMove/AntiKick=%s | ServerKick=%s | TempBan=%s | EchoBack=%s | AutoAway=%s | GroupGuard=%s | HostMessage=%s | Follow=%u[/color]",
              onoff(st->anti_move), onoff(st->anti_server_kick), onoff(st->anti_temp_ban),
              onoff(st->echo_back), onoff(st->auto_away), onoff(st->anti_group_removal),
-             (unsigned int)st->follow_client);
+             onoff(st->auto_close_host_message), (unsigned int)st->follow_client);
 }
 
 static void print_help(uint64 schid)
 {
     tsg_print(schid,
              "Commands: /tsg status | /tsg antimove [on|off|toggle] | /tsg serverkick [...] | /tsg tempban [...] | "
-             "/tsg echo [...] | /tsg autoaway [...] | /tsg groups [...] | /tsg logging [...] | /tsg back [channelPassword] | "
-             "/tsg follow <clientID|off> | /tsg help");
+             "/tsg echo [...] | /tsg autoaway [...] | /tsg groups [...] | /tsg hostmessage [...] | /tsg logging [...] | "
+             "/tsg back [channelPassword] | /tsg follow <clientID|off> | /tsg help");
 }
 
 static void set_status_item(int id, int value)
@@ -487,8 +619,6 @@ static void set_status_item(int id, int value)
     if (!pluginID || !ts3Functions.setPluginMenuEnabled) {
         return;
     }
-    /* API 26 cannot hide or rename menu items at runtime.
-     * One row per feature is therefore used: bright/enabled = ON, grey/disabled = OFF. */
     ts3Functions.setPluginMenuEnabled(pluginID, id, value ? 1 : 0);
 }
 
@@ -506,6 +636,7 @@ static void refresh_menu_status(uint64 schid)
     set_status_item(TSG_MENU_STATUS_ECHO, st->echo_back);
     set_status_item(TSG_MENU_STATUS_AUTO_AWAY, st->auto_away);
     set_status_item(TSG_MENU_STATUS_GROUP_GUARD, st->anti_group_removal);
+    set_status_item(TSG_MENU_STATUS_HOST_MESSAGE, st->auto_close_host_message);
 }
 
 static void capture_group_state(uint64 schid, TSGServerState* st)
@@ -621,7 +752,9 @@ static void schedule_reconnect(uint64 schid, TSGServerState* st, int kind, uint6
     state_lock();
     st->reconnect_pending = 1;
     st->reconnect_kind = kind;
-    st->reconnect_at_ms = now_ms() + delay_seconds * 1000ULL;
+    st->reconnect_at_ms = kind == TSG_RECONNECT_SERVER_KICK
+                              ? now_ms() + 4000ULL
+                              : now_ms() + delay_seconds * 1000ULL;
     st->reconnect_ban_seconds = ban_seconds;
     state_unlock();
 
@@ -651,6 +784,7 @@ static void inherit_state(uint64 old_schid, uint64 new_schid)
         newst->echo_back = oldst->echo_back;
         newst->auto_away = oldst->auto_away;
         newst->anti_group_removal = oldst->anti_group_removal;
+        newst->auto_close_host_message = oldst->auto_close_host_message;
         newst->logging = oldst->logging;
         newst->last_channel = oldst->last_channel;
         snprintf(newst->host, sizeof(newst->host), "%s", oldst->host);
@@ -661,6 +795,190 @@ static void inherit_state(uint64 old_schid, uint64 new_schid)
         snprintf(newst->channel_password, sizeof(newst->channel_password), "%s", oldst->channel_password);
     }
     state_unlock();
+}
+
+static TSGReconnectTask take_reconnect_task(uint64 schid, int kind)
+{
+    TSGReconnectTask task;
+    TSGServerState* st;
+
+    memset(&task, 0, sizeof(task));
+    state_lock();
+    st = find_state_unlocked(schid);
+    if (st && st->reconnect_pending && st->reconnect_kind == kind) {
+        st->reconnect_pending = 0;
+        task.valid = 1;
+        task.old_schid = st->schid;
+        task.kind = st->reconnect_kind;
+        make_server_address(st, task.address, sizeof(task.address));
+        snprintf(task.server_password, sizeof(task.server_password), "%s", st->server_password);
+        snprintf(task.nickname, sizeof(task.nickname), "%s", st->nickname);
+        snprintf(task.channel_path, sizeof(task.channel_path), "%s", st->channel_path);
+        snprintf(task.channel_password, sizeof(task.channel_password), "%s", st->channel_password);
+    }
+    state_unlock();
+    return task;
+}
+
+#ifdef _WIN32
+typedef struct {
+    DWORD pid;
+    int closed;
+} TSGWindowCloseContext;
+
+static BOOL CALLBACK close_owned_dialog(HWND hwnd, LPARAM lparam)
+{
+    TSGWindowCloseContext* ctx = (TSGWindowCloseContext*)lparam;
+    DWORD pid = 0;
+    HWND owner;
+
+    if (!ctx || !IsWindowVisible(hwnd)) {
+        return TRUE;
+    }
+
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != ctx->pid) {
+        return TRUE;
+    }
+
+    owner = GetWindow(hwnd, GW_OWNER);
+    if (!owner) {
+        return TRUE;
+    }
+
+    PostMessage(hwnd, WM_CLOSE, 0, 0);
+    ctx->closed = 1;
+    return FALSE;
+}
+#endif
+
+static int dismiss_host_message_popup(void)
+{
+#ifdef _WIN32
+    TSGWindowCloseContext ctx;
+    ctx.pid = GetCurrentProcessId();
+    ctx.closed = 0;
+    EnumWindows(close_owned_dialog, (LPARAM)&ctx);
+    return ctx.closed;
+#elif defined(TSG_HAVE_X11)
+    Display* display;
+    Window focus = None;
+    int revert_to = 0;
+    Atom pid_atom;
+    Atom state_atom;
+    Atom modal_atom;
+    Atom wm_protocols;
+    Atom wm_delete;
+    Atom actual_type = None;
+    int actual_format = 0;
+    unsigned long item_count = 0;
+    unsigned long bytes_after = 0;
+    unsigned char* data = NULL;
+    int is_modal = 0;
+    int same_process = 0;
+    unsigned long i;
+    XEvent event;
+
+    display = XOpenDisplay(NULL);
+    if (!display) {
+        return 0;
+    }
+
+    XGetInputFocus(display, &focus, &revert_to);
+    if (focus == None || focus == PointerRoot) {
+        XCloseDisplay(display);
+        return 0;
+    }
+
+    pid_atom = XInternAtom(display, "_NET_WM_PID", False);
+    if (XGetWindowProperty(display, focus, pid_atom, 0, 1, False, XA_CARDINAL,
+                           &actual_type, &actual_format, &item_count, &bytes_after, &data) == Success &&
+        data && item_count == 1) {
+        same_process = (*(unsigned long*)data == (unsigned long)getpid());
+    }
+    if (data) {
+        XFree(data);
+        data = NULL;
+    }
+    if (!same_process) {
+        XCloseDisplay(display);
+        return 0;
+    }
+
+    state_atom = XInternAtom(display, "_NET_WM_STATE", False);
+    modal_atom = XInternAtom(display, "_NET_WM_STATE_MODAL", False);
+    if (XGetWindowProperty(display, focus, state_atom, 0, 64, False, XA_ATOM,
+                           &actual_type, &actual_format, &item_count, &bytes_after, &data) == Success &&
+        data) {
+        Atom* atoms = (Atom*)data;
+        for (i = 0; i < item_count; ++i) {
+            if (atoms[i] == modal_atom) {
+                is_modal = 1;
+                break;
+            }
+        }
+    }
+    if (data) {
+        XFree(data);
+        data = NULL;
+    }
+    if (!is_modal) {
+        XCloseDisplay(display);
+        return 0;
+    }
+
+    wm_protocols = XInternAtom(display, "WM_PROTOCOLS", False);
+    wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", False);
+    memset(&event, 0, sizeof(event));
+    event.xclient.type = ClientMessage;
+    event.xclient.window = focus;
+    event.xclient.message_type = wm_protocols;
+    event.xclient.format = 32;
+    event.xclient.data.l[0] = (long)wm_delete;
+    event.xclient.data.l[1] = CurrentTime;
+    XSendEvent(display, focus, False, NoEventMask, &event);
+    XFlush(display);
+    XCloseDisplay(display);
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+static void schedule_host_message_close(uint64 schid, TSGServerState* st)
+{
+    int mode = HostMessageMode_NONE;
+
+    if (!st || !st->auto_close_host_message || !ts3Functions.getServerVariableAsInt) {
+        return;
+    }
+    if (ts3Functions.getServerVariableAsInt(schid, VIRTUALSERVER_HOSTMESSAGE_MODE, &mode) != 0 ||
+        mode != HostMessageMode_MODAL) {
+        return;
+    }
+
+    state_lock();
+    st->host_message_close_pending = 1;
+    st->host_message_close_at_ms = now_ms() + TSG_HOST_MESSAGE_CLOSE_DELAY_MS;
+    state_unlock();
+}
+
+static void worker_host_message(uint64 schid)
+{
+    TSGServerState* st;
+    int close_now = 0;
+
+    state_lock();
+    st = find_state_unlocked(schid);
+    if (st && st->host_message_close_pending && now_ms() >= st->host_message_close_at_ms) {
+        st->host_message_close_pending = 0;
+        close_now = 1;
+    }
+    state_unlock();
+
+    if (close_now) {
+        dismiss_host_message_popup();
+    }
 }
 
 static int should_suppress_echo(TSGServerState* st, anyID peer, uint64_t hash, int is_poke)
@@ -861,6 +1179,7 @@ static void* worker_main(void* unused)
 
         for (i = 0; i < count; ++i) {
             worker_auto_away(schids[i]);
+            worker_host_message(schids[i]);
         }
 
         task = pop_reconnect_task(now_ms());
@@ -937,6 +1256,7 @@ TSG_EXPORT void ts3plugin_setFunctionPointers(const struct TS3Functions funcs)
 TSG_EXPORT int ts3plugin_init(void)
 {
     memset(states, 0, sizeof(states));
+    load_preferences();
     set_worker_stop(0);
     if (start_worker_thread()) {
         worker_started = 1;
@@ -984,7 +1304,7 @@ TSG_EXPORT void ts3plugin_freeMemory(void* data)
 TSG_EXPORT void ts3plugin_initHotkeys(struct PluginHotkey*** hotkeys)
 {
     if (!hotkeys) return;
-    *hotkeys = (struct PluginHotkey**)calloc(9, sizeof(struct PluginHotkey*));
+    *hotkeys = (struct PluginHotkey**)calloc(10, sizeof(struct PluginHotkey*));
     if (!*hotkeys) return;
 
     (*hotkeys)[0] = make_hotkey("tsg_toggle_antimove", "TSGuard: Toggle AntiMove / AntiKick");
@@ -993,9 +1313,10 @@ TSG_EXPORT void ts3plugin_initHotkeys(struct PluginHotkey*** hotkeys)
     (*hotkeys)[3] = make_hotkey("tsg_toggle_echo", "TSGuard: Toggle Poke/Message Back");
     (*hotkeys)[4] = make_hotkey("tsg_toggle_autoaway", "TSGuard: Toggle Auto Away");
     (*hotkeys)[5] = make_hotkey("tsg_toggle_groups", "TSGuard: Toggle Anti Group Removal");
-    (*hotkeys)[6] = make_hotkey("tsg_return_last", "TSGuard: Return to last channel");
-    (*hotkeys)[7] = make_hotkey("tsg_stop_follow", "TSGuard: Stop AutoFollow");
-    (*hotkeys)[8] = NULL;
+    (*hotkeys)[6] = make_hotkey("tsg_toggle_hostmessage", "TSGuard: Toggle Auto Close Server Message");
+    (*hotkeys)[7] = make_hotkey("tsg_return_last", "TSGuard: Return to last channel");
+    (*hotkeys)[8] = make_hotkey("tsg_stop_follow", "TSGuard: Stop AutoFollow");
+    (*hotkeys)[9] = NULL;
 }
 
 TSG_EXPORT void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** menuIcon)
@@ -1004,7 +1325,7 @@ TSG_EXPORT void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** m
     if (menuIcon) *menuIcon = NULL;
     if (!menuItems) return;
 
-    *menuItems = (struct PluginMenuItem**)calloc(16, sizeof(struct PluginMenuItem*));
+    *menuItems = (struct PluginMenuItem**)calloc(18, sizeof(struct PluginMenuItem*));
     if (!*menuItems) return;
 
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_CLIENT, TSG_MENU_FOLLOW_CLIENT, "Follow/unfollow client");
@@ -1015,6 +1336,7 @@ TSG_EXPORT void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** m
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_TOGGLE_ECHO_BACK, "Toggle Poke/Message Back");
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_TOGGLE_AUTO_AWAY, "Toggle Auto Away (5 min)");
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_TOGGLE_GROUP_GUARD, "Toggle Anti Group Removal");
+    (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_TOGGLE_HOST_MESSAGE, "Toggle Auto Close Server Message");
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_RETURN_LAST, "Return to last channel");
 
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_STATUS_HEADER, "--- Current status ---");
@@ -1024,6 +1346,7 @@ TSG_EXPORT void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** m
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_STATUS_ECHO, "● Poke/Message Back");
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_STATUS_AUTO_AWAY, "● Auto Away");
     (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_STATUS_GROUP_GUARD, "● Anti Group Removal");
+    (*menuItems)[n++] = make_menu(PLUGIN_MENU_TYPE_GLOBAL, TSG_MENU_STATUS_HOST_MESSAGE, "● Auto Close Server Message");
     (*menuItems)[n] = NULL;
 
     if (ts3Functions.getCurrentServerConnectionHandlerID) {
@@ -1057,7 +1380,10 @@ TSG_EXPORT int ts3plugin_processCommand(uint64 schid, const char* command)
     if (!strcasecmp(cmd, "antimove") || !strcasecmp(cmd, "antikick")) {
         st->anti_move = parse_toggle(arg, st->anti_move, &ok);
         if (!ok) tsg_print(schid, "Usage: /tsg antimove [on|off|toggle]");
-        else tsg_print(schid, "AntiMove / AntiKick %s.", onoff(st->anti_move));
+        else {
+            tsg_print(schid, "AntiMove / AntiKick %s.", onoff(st->anti_move));
+            persist_state_options(st);
+        }
         refresh_menu_status(schid);
         return 0;
     }
@@ -1067,6 +1393,7 @@ TSG_EXPORT int ts3plugin_processCommand(uint64 schid, const char* command)
         else {
             tsg_print(schid, "Anti Server Kick %s.", onoff(st->anti_server_kick));
             if (st->anti_server_kick) capture_connection_snapshot(schid, st);
+            persist_state_options(st);
         }
         refresh_menu_status(schid);
         return 0;
@@ -1077,6 +1404,7 @@ TSG_EXPORT int ts3plugin_processCommand(uint64 schid, const char* command)
         else {
             tsg_print(schid, "Anti Server Temporary Ban %s.", onoff(st->anti_temp_ban));
             if (st->anti_temp_ban) capture_connection_snapshot(schid, st);
+            persist_state_options(st);
         }
         refresh_menu_status(schid);
         return 0;
@@ -1084,7 +1412,10 @@ TSG_EXPORT int ts3plugin_processCommand(uint64 schid, const char* command)
     if (!strcasecmp(cmd, "echo")) {
         st->echo_back = parse_toggle(arg, st->echo_back, &ok);
         if (!ok) tsg_print(schid, "Usage: /tsg echo [on|off|toggle]");
-        else tsg_print(schid, "Poke/Message Back %s.", onoff(st->echo_back));
+        else {
+            tsg_print(schid, "Poke/Message Back %s.", onoff(st->echo_back));
+            persist_state_options(st);
+        }
         refresh_menu_status(schid);
         return 0;
     }
@@ -1093,22 +1424,41 @@ TSG_EXPORT int ts3plugin_processCommand(uint64 schid, const char* command)
         st->auto_away = parse_toggle(arg, st->auto_away, &ok);
         state_unlock();
         if (!ok) tsg_print(schid, "Usage: /tsg autoaway [on|off|toggle]");
-        else tsg_print(schid, "Auto Away (5 min) %s.", onoff(st->auto_away));
+        else {
+            tsg_print(schid, "Auto Away (5 min) %s.", onoff(st->auto_away));
+            persist_state_options(st);
+        }
         refresh_menu_status(schid);
         return 0;
     }
     if (!strcasecmp(cmd, "groups") || !strcasecmp(cmd, "groupguard")) {
         st->anti_group_removal = parse_toggle(arg, st->anti_group_removal, &ok);
         if (!ok) tsg_print(schid, "Usage: /tsg groups [on|off|toggle]");
-        else tsg_print(schid, "Anti Server/Channel Group Removal %s.", onoff(st->anti_group_removal));
+        else {
+            tsg_print(schid, "Anti Server/Channel Group Removal %s.", onoff(st->anti_group_removal));
+            persist_state_options(st);
+        }
         capture_group_state(schid, st);
+        refresh_menu_status(schid);
+        return 0;
+    }
+    if (!strcasecmp(cmd, "hostmessage") || !strcasecmp(cmd, "servermessage")) {
+        st->auto_close_host_message = parse_toggle(arg, st->auto_close_host_message, &ok);
+        if (!ok) tsg_print(schid, "Usage: /tsg hostmessage [on|off|toggle]");
+        else {
+            tsg_print(schid, "Auto Close Server Message %s.", onoff(st->auto_close_host_message));
+            persist_state_options(st);
+        }
         refresh_menu_status(schid);
         return 0;
     }
     if (!strcasecmp(cmd, "logging")) {
         st->logging = parse_toggle(arg, st->logging, &ok);
         if (!ok) tsg_print(schid, "Usage: /tsg logging [on|off|toggle]");
-        else tsg_print(schid, "Event logging %s.", onoff(st->logging));
+        else {
+            tsg_print(schid, "Event logging %s.", onoff(st->logging));
+            persist_state_options(st);
+        }
         return 0;
     }
     if (!strcasecmp(cmd, "back")) {
@@ -1157,27 +1507,37 @@ TSG_EXPORT void ts3plugin_onHotkeyEvent(const char* keyword)
 
     if (!strcmp(keyword, "tsg_toggle_antimove")) {
         st->anti_move = !st->anti_move;
+        persist_state_options(st);
         tsg_print(schid, "AntiMove / AntiKick %s.", onoff(st->anti_move));
     } else if (!strcmp(keyword, "tsg_toggle_serverkick")) {
         st->anti_server_kick = !st->anti_server_kick;
         if (st->anti_server_kick) capture_connection_snapshot(schid, st);
+        persist_state_options(st);
         tsg_print(schid, "Anti Server Kick %s.", onoff(st->anti_server_kick));
     } else if (!strcmp(keyword, "tsg_toggle_tempban")) {
         st->anti_temp_ban = !st->anti_temp_ban;
         if (st->anti_temp_ban) capture_connection_snapshot(schid, st);
+        persist_state_options(st);
         tsg_print(schid, "Anti Server Temporary Ban %s.", onoff(st->anti_temp_ban));
     } else if (!strcmp(keyword, "tsg_toggle_echo")) {
         st->echo_back = !st->echo_back;
+        persist_state_options(st);
         tsg_print(schid, "Poke/Message Back %s.", onoff(st->echo_back));
     } else if (!strcmp(keyword, "tsg_toggle_autoaway")) {
         state_lock();
         st->auto_away = !st->auto_away;
         state_unlock();
+        persist_state_options(st);
         tsg_print(schid, "Auto Away (5 min) %s.", onoff(st->auto_away));
     } else if (!strcmp(keyword, "tsg_toggle_groups")) {
         st->anti_group_removal = !st->anti_group_removal;
         capture_group_state(schid, st);
+        persist_state_options(st);
         tsg_print(schid, "Anti Server/Channel Group Removal %s.", onoff(st->anti_group_removal));
+    } else if (!strcmp(keyword, "tsg_toggle_hostmessage")) {
+        st->auto_close_host_message = !st->auto_close_host_message;
+        persist_state_options(st);
+        tsg_print(schid, "Auto Close Server Message %s.", onoff(st->auto_close_host_message));
     } else if (!strcmp(keyword, "tsg_return_last")) {
         if (st->last_channel) move_self(schid, st->last_channel, "", "ReturnLast");
         else tsg_print(schid, "No previous channel recorded yet.");
@@ -1214,39 +1574,49 @@ TSG_EXPORT void ts3plugin_onMenuItemEvent(uint64 schid, enum PluginMenuType type
     switch (menuItemID) {
         case TSG_MENU_TOGGLE_ANTIMOVE:
             st->anti_move = !st->anti_move;
+            persist_state_options(st);
             tsg_print(schid, "AntiMove / AntiKick %s.", onoff(st->anti_move));
             break;
         case TSG_MENU_TOGGLE_SERVER_KICK:
             st->anti_server_kick = !st->anti_server_kick;
             if (st->anti_server_kick) capture_connection_snapshot(schid, st);
+            persist_state_options(st);
             tsg_print(schid, "Anti Server Kick %s.", onoff(st->anti_server_kick));
             break;
         case TSG_MENU_TOGGLE_TEMP_BAN:
             st->anti_temp_ban = !st->anti_temp_ban;
             if (st->anti_temp_ban) capture_connection_snapshot(schid, st);
+            persist_state_options(st);
             tsg_print(schid, "Anti Server Temporary Ban %s.", onoff(st->anti_temp_ban));
             break;
         case TSG_MENU_TOGGLE_ECHO_BACK:
             st->echo_back = !st->echo_back;
+            persist_state_options(st);
             tsg_print(schid, "Poke/Message Back %s.", onoff(st->echo_back));
             break;
         case TSG_MENU_TOGGLE_AUTO_AWAY:
             state_lock();
             st->auto_away = !st->auto_away;
             state_unlock();
+            persist_state_options(st);
             tsg_print(schid, "Auto Away (5 min) %s.", onoff(st->auto_away));
             break;
         case TSG_MENU_TOGGLE_GROUP_GUARD:
             st->anti_group_removal = !st->anti_group_removal;
             capture_group_state(schid, st);
+            persist_state_options(st);
             tsg_print(schid, "Anti Server/Channel Group Removal %s.", onoff(st->anti_group_removal));
+            break;
+        case TSG_MENU_TOGGLE_HOST_MESSAGE:
+            st->auto_close_host_message = !st->auto_close_host_message;
+            persist_state_options(st);
+            tsg_print(schid, "Auto Close Server Message %s.", onoff(st->auto_close_host_message));
             break;
         case TSG_MENU_RETURN_LAST:
             if (st->last_channel) move_self(schid, st->last_channel, "", "ReturnLast");
             else tsg_print(schid, "No previous channel recorded yet.");
             break;
         default:
-            /* Status rows are informational. Bright/enabled = ON; grey/disabled = OFF. */
             break;
     }
     refresh_menu_status(schid);
@@ -1260,14 +1630,25 @@ TSG_EXPORT void ts3plugin_currentServerConnectionChanged(uint64 schid)
 TSG_EXPORT void ts3plugin_onConnectStatusChangeEvent(uint64 schid, int newStatus, unsigned int errorNumber)
 {
     TSGServerState* st = state_for(schid);
+    TSGReconnectTask task;
     (void)errorNumber;
     if (!st) return;
+
+    if (newStatus == STATUS_DISCONNECTED && st->reconnect_pending &&
+        st->reconnect_kind == TSG_RECONNECT_SERVER_KICK) {
+        task = take_reconnect_task(schid, TSG_RECONNECT_SERVER_KICK);
+        if (task.valid) {
+            run_reconnect_task(&task);
+        }
+        return;
+    }
 
     if (newStatus == STATUS_CONNECTION_ESTABLISHED) {
         state_lock();
         st->reconnect_pending = 0;
         state_unlock();
         capture_connection_snapshot(schid, st);
+        schedule_host_message_close(schid, st);
         refresh_menu_status(schid);
     }
 }
