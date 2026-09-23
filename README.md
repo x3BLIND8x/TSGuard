@@ -12,6 +12,7 @@ TSGuard is a TeamSpeak 3 client plugin for Windows x64 and Linux x64.
 - **Anti Group Removal** — attempts to restore removed server/channel groups when your permissions allow it.
 - **AutoFollow** — follows another client between channels.
 - **Return to last channel** — available from the plugin menu, command, and hotkey.
+- **Auto Close Server Message** — closes the modal server message shortly after joining.
 - **Event logging** — logs move, kick, ban, and group events.
 
 ## Install
@@ -61,6 +62,7 @@ Command prefix: `/tsg`
 /tsg echo on|off|toggle
 /tsg autoaway on|off|toggle
 /tsg groups on|off|toggle
+/tsg hostmessage on|off|toggle
 /tsg logging on|off|toggle
 /tsg back [channelPassword]
 /tsg follow <clientID>
@@ -80,10 +82,11 @@ Command prefix: `/tsg`
 | Poke/Message Back | Off |
 | Auto Away | Off |
 | Anti Group Removal | Off |
+| Auto Close Server Message | Off |
 | Event logging | On |
 | AutoFollow | Off |
 
-Settings are currently kept for the active TeamSpeak session and reset when the plugin/client restarts.
+Feature toggles are saved in the TeamSpeak config directory and restored after restarting the client/plugin.
 
 ## Build
 
